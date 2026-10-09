@@ -1,0 +1,68 @@
+name: build
+
+# Compila el agente en Windows desde el código de este repositorio.
+#   - push / pull request: tests + build (versión dev-<commit>).
+#   - tag vX.Y.Z: build con esa versión, listo para firmar y publicar.
+# La firma la hace SignPath (SignPath Foundation) a partir del artefacto
+# subido acá: así el binario firmado sale, verificable, de este código.
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+
+      - name: Versión
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") } else { $v = "" }
+          "valor=$v" >> $env:GITHUB_OUTPUT
+
+      # build.ps1 corre los tests, incrusta icono y propiedades (go-winres) y compila.
+      - name: Build producción
+        shell: pwsh
+        run: ./build.ps1 -Version "${{ steps.version.outputs.valor }}"
+
+      - name: Build beta
+        shell: pwsh
+        run: ./build.ps1 -Version "${{ steps.version.outputs.valor }}" -Beta
+
+      - name: Subir artefacto sin firmar
+        id: artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: syncronize-agent
+          path: |
+            dist/syncronize-agent.exe
+            dist/syncronize-agent-beta.exe
+          if-no-files-found: error
+
+      # ── Firma (se activa cuando SignPath Foundation apruebe el proyecto) ──
+      # Requiere el secreto SIGNPATH_API_TOKEN y los datos que da SignPath.
+      # Cada pedido de firma lo aprueba a mano un aprobador en SignPath.
+      #
+      # - name: Firmar con SignPath
+      #   if: github.ref_type == 'tag'
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: '<de SignPath>'
+      #     project-slug: 'syncronize-agent'
+      #     signing-policy-slug: 'release-signing'
+      #     github-artifact-id: ${{ steps.artefacto.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     output-artifact-directory: firmado
