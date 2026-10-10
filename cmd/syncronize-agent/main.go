@@ -37,9 +37,13 @@ var Version = "0.1.0-dev"
 const ayuda = `Uso: syncronize-agent <comando>
 
   (doble clic)  pide permisos de administrador y el código, y vincula
-  enroll --codigo XXXX [--beta | --servidor URL] [--soporte-remoto]
+  enroll --codigo XXXX [--beta | --servidor URL] [--soporte-remoto si|no] [--resultado ARCHIVO]
             vincula el equipo, se instala en Program Files y arranca el servicio
-            (--soporte-remoto: el cliente autorizó el soporte remoto)
+            (--soporte-remoto: lo que decidió el cliente; sin él, queda sin preguntar)
+  actualizar [--resultado ARCHIVO]
+            instala o actualiza el servicio desde Program Files y lo arranca
+  vinculos --resultado ARCHIVO
+            lista los servicios técnicos vinculados (lo usa el instalador)
   status    muestra la vinculación, el servicio y los reportes en cola
   soporte [permitir | quitar]
             estado del soporte remoto (RustDesk); permitir/quitar cambia la
@@ -47,7 +51,10 @@ const ayuda = `Uso: syncronize-agent <comando>
   collect   imprime el reporte del equipo en JSON (no envía nada)
   send      toma un reporte y lo envía ahora (prueba de conexión)
   start | stop | restart
-  uninstall detiene el servicio, lo quita y BORRA la vinculación
+  uninstall [--conservar-archivos]
+            detiene el servicio, lo quita y BORRA la vinculación (y RustDesk si
+            lo instaló el agente); --conservar-archivos deja Program Files al
+            desinstalador de Windows
   run       corre en primer plano (diagnóstico)
   version
 
@@ -82,6 +89,10 @@ func ejecutar(cmd string, args []string) error {
 		return estado()
 	case "enroll":
 		return vincular(args)
+	case "actualizar":
+		return actualizar(args)
+	case "vinculos":
+		return listarVinculos(args)
 	case "send":
 		if err := exigirAdmin(); err != nil {
 			return err
@@ -101,7 +112,7 @@ func ejecutar(cmd string, args []string) error {
 		}
 		return service.Control(nuevoServicio(), cmd)
 	case "uninstall":
-		return desinstalar()
+		return desinstalar(args)
 	case "soporte":
 		return soporte(args)
 	case "run":
@@ -120,15 +131,16 @@ func vincular(args []string) error {
 	codigo := fs.String("codigo", "", "código de vinculación generado en Syncronize")
 	beta := fs.Bool("beta", false, "usar el servidor de pruebas")
 	servidor := fs.String("servidor", "", "URL del API (por defecto, producción)")
-	conSoporte := fs.Bool("soporte-remoto", false, "el cliente autorizó el soporte remoto")
+	conSoporte := fs.String("soporte-remoto", "", "si | no: lo que decidió el cliente")
+	resultado := fs.String("resultado", "", "archivo donde dejar el resultado (para el instalador)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *codigo == "" {
-		return errors.New("falta --codigo (se genera en Syncronize, ficha del cliente → Monitoreo)")
+		return escribirResultado(*resultado, "", errors.New("falta --codigo (se genera en Syncronize, ficha del cliente → Monitoreo)"))
 	}
 	if err := exigirAdmin(); err != nil {
-		return err
+		return escribirResultado(*resultado, "", err)
 	}
 	url := servidorPorDefecto()
 	if *beta {
@@ -139,10 +151,89 @@ func vincular(args []string) error {
 	}
 	// Sin --soporte-remoto queda sin preguntar: el asistente lo pregunta después.
 	var soporte *bool
-	if *conSoporte {
-		soporte = conSoporte
+	switch strings.ToLower(*conSoporte) {
+	case "si", "sí", "true", "s":
+		si := true
+		soporte = &si
+	case "no", "false", "n":
+		no := false
+		soporte = &no
 	}
-	return vincularConCodigo(*codigo, url, nil, soporte)
+	resumen, err := vincularConCodigo(*codigo, url, nil, soporte)
+	return escribirResultado(*resultado, resumen, err)
+}
+
+// actualizar instala o actualiza el servicio (el instalador de Windows ya
+// dejó el .exe nuevo en Program Files) y lo arranca.
+func actualizar(args []string) error {
+	fs := flag.NewFlagSet("actualizar", flag.ContinueOnError)
+	resultado := fs.String("resultado", "", "archivo donde dejar el resultado")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := exigirAdmin(); err != nil {
+		return escribirResultado(*resultado, "", err)
+	}
+	if err := instalarYArrancar(); err != nil {
+		return escribirResultado(*resultado, "", err)
+	}
+	return escribirResultado(*resultado, "Agente actualizado a la versión "+Version+" y corriendo.", nil)
+}
+
+// listarVinculos deja una línea por vínculo: "empresa<TAB>soporte", con
+// soporte = si | no | ? (sin preguntar). Sin vínculos, el archivo queda vacío.
+func listarVinculos(args []string) error {
+	fs := flag.NewFlagSet("vinculos", flag.ContinueOnError)
+	resultado := fs.String("resultado", "", "archivo donde dejar la lista")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var b strings.Builder
+	if cfg, err := config.Cargar(); err == nil {
+		for _, v := range cfg.Vinculos {
+			sop := "?"
+			if v.SoporteRemoto != nil {
+				sop = map[bool]string{true: "si", false: "no"}[*v.SoporteRemoto]
+			}
+			fmt.Fprintf(&b, "%s\t%s\r\n", v.Nombre(), sop)
+		}
+	}
+	if *resultado == "" {
+		fmt.Print(b.String())
+		return nil
+	}
+	return escribirArchivoUTF8(*resultado, b.String())
+}
+
+// escribirResultado deja para el instalador "OK" o "ERROR" en la 1.ª línea y
+// el mensaje para mostrar al cliente en las siguientes. Devuelve err tal cual.
+func escribirResultado(ruta, resumen string, err error) error {
+	if ruta == "" {
+		return err
+	}
+	texto := "OK\r\n" + resumen
+	if err != nil {
+		texto = "ERROR\r\n" + mensajeParaCliente(err)
+	}
+	if e := escribirArchivoUTF8(ruta, texto); e != nil && err == nil {
+		return e
+	}
+	return err
+}
+
+// mensajeParaCliente: primera letra en mayúscula y sin saltos de línea.
+func mensajeParaCliente(err error) string {
+	m := strings.Join(strings.Fields(err.Error()), " ")
+	if m == "" {
+		return "Error desconocido"
+	}
+	r := []rune(m)
+	return strings.ToUpper(string(r[0])) + string(r[1:])
+}
+
+// escribirArchivoUTF8 con BOM: así el instalador (Inno Setup) lee bien las tildes.
+func escribirArchivoUTF8(ruta, texto string) error {
+	return os.WriteFile(ruta, append([]byte{0xEF, 0xBB, 0xBF}, texto...), 0o600)
 }
 
 // vincularConCodigo canjea el código y AGREGA el vínculo (los que ya había,
@@ -150,7 +241,7 @@ func vincular(args []string) error {
 // lector, en el asistente) o usa lo que diga soporte (en `enroll`). Instala
 // el agente en Program Files y (re)arranca el servicio para que tome el
 // vínculo nuevo. Pide admin.
-func vincularConCodigo(codigo, url string, lector *bufio.Reader, soporte *bool) error {
+func vincularConCodigo(codigo, url string, lector *bufio.Reader, soporte *bool) (string, error) {
 	fmt.Println("Leyendo el equipo...")
 	r := collector.Recolectar(Version)
 	// Volver a vincular con la misma empresa le cambia el token: con el
@@ -163,11 +254,11 @@ func vincularConCodigo(codigo, url string, lector *bufio.Reader, soporte *bool) 
 		if detenido {
 			_ = nuevoServicio().Start()
 		}
-		return err
+		return "", err
 	}
 	cfg, err := config.Cargar()
 	if err != nil && !errors.Is(err, config.ErrSinVincular) {
-		return err
+		return "", err
 	}
 	v := &config.Vinculo{
 		Servidor: url, AgenteID: res.AgenteID, Token: res.Token, Empresa: res.Empresa,
@@ -178,13 +269,13 @@ func vincularConCodigo(codigo, url string, lector *bufio.Reader, soporte *bool) 
 	if lector != nil {
 		preguntarSoporte(lector, v)
 	}
-	prepararSoporte(cfg)
+	notaSoporte := prepararSoporte(cfg)
 	if err := config.Guardar(cfg); err != nil {
-		return err
+		return "", err
 	}
 	fmt.Println("Instalando el servicio...")
 	if err := instalarYArrancar(); err != nil {
-		return fmt.Errorf("vinculado, pero %w", err)
+		return "", fmt.Errorf("vinculado, pero %w", err)
 	}
 	nombre := res.Empresa
 	if nombre == "" {
@@ -195,7 +286,11 @@ func vincularConCodigo(codigo, url string, lector *bufio.Reader, soporte *bool) 
 		fmt.Printf("Está vinculado con %d servicios técnicos; cada uno ve solo lo suyo.\n", len(cfg.Vinculos))
 	}
 	fmt.Println("Instalado en", dirInstalacion())
-	return nil
+	resumen := "El equipo quedó vinculado con " + nombre + "."
+	if notaSoporte != "" {
+		resumen += "\r\n" + notaSoporte
+	}
+	return resumen, nil
 }
 
 // ── status / uninstall ──────────────────────────────────────────────────
@@ -230,7 +325,12 @@ func estado() error {
 	return nil
 }
 
-func desinstalar() error {
+func desinstalar(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	conservar := fs.Bool("conservar-archivos", false, "no borrar Program Files (lo hace el desinstalador de Windows)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	if err := exigirAdmin(); err != nil {
 		return err
 	}
@@ -249,7 +349,9 @@ func desinstalar() error {
 	if err := config.Borrar(); err != nil {
 		return err
 	}
-	borrarInstalacion()
+	if !*conservar {
+		borrarInstalacion()
+	}
 	fmt.Println("Servicio quitado, vínculos borrados y agente desinstalado.")
 	return nil
 }

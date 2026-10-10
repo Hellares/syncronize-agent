@@ -231,7 +231,7 @@ func asistente() {
 			continue
 		}
 		fmt.Println()
-		if err := vincularConCodigo(codigo, servidorPorDefecto(), lector, nil); err != nil {
+		if _, err := vincularConCodigo(codigo, servidorPorDefecto(), lector, nil); err != nil {
 			fmt.Println()
 			fmt.Println("No se pudo vincular:", err)
 			fmt.Println()
@@ -289,13 +289,15 @@ func preguntarSoporte(lector *bufio.Reader, v *config.Vinculo) {
 
 // prepararSoporte instala RustDesk ya (con el cliente mirando) si alguien lo
 // autorizó. Si falla, el servicio lo vuelve a intentar cuando el técnico lo pida.
-// Si ya nadie lo autoriza, el servicio lo desinstala al arrancar.
-func prepararSoporte(cfg *config.Config) {
+// Si ya nadie lo autoriza, el servicio lo desinstala al arrancar. Devuelve una
+// nota para el resumen del instalador ("" si no hay nada que decir).
+func prepararSoporte(cfg *config.Config) string {
 	if cfg.ConSoporte() == 0 {
 		if cfg.RustDeskPropio && remoto.Instalado() {
 			fmt.Println("\nSe quitará el soporte remoto (RustDesk) de este equipo.")
+			return "Se quitó el soporte remoto de este equipo."
 		}
-		return
+		return ""
 	}
 	if remoto.InstaladoPorAgente(config.Dir()) {
 		cfg.RustDeskPropio = true
@@ -303,15 +305,16 @@ func prepararSoporte(cfg *config.Config) {
 	if remoto.Instalado() {
 		if !cfg.RustDeskPropio {
 			fmt.Println("\nEste equipo ya tenía RustDesk: se usará ese, sin cambiar su configuración.")
-			return
+			return "Soporte remoto: se usará el RustDesk que ya tenía este equipo."
 		}
 		// Lo puso el agente: se completa lo que falte (p. ej. el servicio que
 		// v0.6.0 no creaba).
 		if err := remoto.Preparar(); err != nil {
 			fmt.Println("\nNo se pudo preparar el soporte remoto:", err)
 			fmt.Println("Se volverá a intentar cuando el técnico lo pida.")
+			return "Soporte remoto: se terminará de preparar cuando el técnico lo pida."
 		}
-		return
+		return "Soporte remoto listo. Queda apagado hasta que el técnico lo pida."
 	}
 	fmt.Printf("\nInstalando el soporte remoto (RustDesk %s, ~26 MB)...\n", remoto.Version)
 	err := remoto.Instalar(config.Dir(), func(bajado, total int64) {
@@ -327,10 +330,11 @@ func prepararSoporte(cfg *config.Config) {
 	if err != nil {
 		fmt.Println("No se pudo instalar ahora:", err)
 		fmt.Println("Se volverá a intentar solo cuando el técnico pida soporte.")
-		return
+		return "Soporte remoto: no se pudo instalar ahora; se volverá a intentar cuando el técnico lo pida."
 	}
 	cfg.RustDeskPropio = true
 	fmt.Println("Soporte remoto instalado. Queda APAGADO hasta que el técnico lo pida.")
+	return "Soporte remoto instalado. Queda apagado hasta que el técnico lo pida."
 }
 
 func pausa() {

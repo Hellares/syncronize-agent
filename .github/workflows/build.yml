@@ -32,6 +32,11 @@ jobs:
           if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") } else { $v = "" }
           "valor=$v" >> $env:GITHUB_OUTPUT
 
+      # Inno Setup arma el instalador gráfico (build.ps1 lo usa si lo encuentra).
+      - name: Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
       # build.ps1 corre los tests, incrusta icono y propiedades (go-winres) y compila.
       - name: Build producción
         shell: pwsh
@@ -49,6 +54,7 @@ jobs:
           path: |
             dist/syncronize-agent.exe
             dist/syncronize-agent-beta.exe
+            dist/Syncronize-Agent-Setup-*.exe
           if-no-files-found: error
 
       # ── Firma (se activa cuando SignPath Foundation apruebe el proyecto) ──

@@ -41,5 +41,20 @@ $ok = $LASTEXITCODE -eq 0
 Remove-Item $syso -ErrorAction SilentlyContinue
 if (-not $ok) { exit 1 }
 Write-Host "$salida ($Version)"
+
+# Instalador grafico (Inno Setup 6): dist\Syncronize-Agent-Setup[-beta]-<version>.exe.
+# Sin Inno Setup instalado se salta (el .exe suelto sigue sirviendo).
+$iscc = @($env:ISCC, "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") |
+    Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if ($iscc -and $Version -match '^\d+\.\d+\.\d+$') {
+    $defs = @("/DVersion=$Version")
+    if ($Beta) { $defs += "/DBeta" }
+    & $iscc /Q @defs instalador\syncronize-agent.iss
+    if ($LASTEXITCODE -ne 0) { exit 1 }
+    Write-Host "instalador: dist\Syncronize-Agent-Setup$(if ($Beta) { '-beta' })-$Version.exe"
+} elseif (-not $iscc) {
+    Write-Host "(sin Inno Setup: no se arma el instalador grafico)"
+}
 # TODO: firmar con el certificado de firma de codigo (signtool sign /fd sha256 ...)
 #       antes de repartirlo: sin firma, SmartScreen muestra "Windows protegio su PC".
