@@ -24,6 +24,7 @@ func (f *falso) Instalar() error {
 	f.instalado = true
 	return nil
 }
+func (f *falso) Preparar() error { f.encendido = false; return nil }
 func (f *falso) Configurar(s Servidor) error {
 	f.configurado = append(f.configurado, s)
 	return nil

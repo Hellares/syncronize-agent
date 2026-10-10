@@ -64,6 +64,16 @@ func Instalado() bool {
 	return err == nil
 }
 
+func rutaLogInstalacion(dir string) string { return filepath.Join(dir, "rustdesk-instalacion.log") }
+
+// InstaladoPorAgente: el log del MSI solo lo deja Instalar. Sirve para
+// reconocer un RustDesk que puso el agente aunque la instalación no haya
+// terminado de configurarlo (v0.6.0 lo dejaba sin servicio y lo creía ajeno).
+func InstaladoPorAgente(dir string) bool {
+	_, err := os.Stat(rutaLogInstalacion(dir))
+	return err == nil && Instalado()
+}
+
 // Instalar descarga el MSI oficial a dir, verifica el SHA-256, lo instala en
 // silencio (sin accesos directos ni impresora virtual) y lo deja APAGADO.
 // progreso puede ser nil.
@@ -76,7 +86,7 @@ func Instalar(dir string, progreso func(bajado, total int64)) error {
 	if err := descargar(msi, progreso); err != nil {
 		return fmt.Errorf("descargar RustDesk: %w", err)
 	}
-	logMSI := filepath.Join(dir, "rustdesk-instalacion.log")
+	logMSI := rutaLogInstalacion(dir)
 	cmd := exec.Command("msiexec", "/i", msi, "/qn", "/norestart",
 		"CREATESTARTMENUSHORTCUTS=N", "CREATEDESKTOPSHORTCUTS=N", "INSTALLPRINTER=N",
 		"/l*v", logMSI)
@@ -91,13 +101,54 @@ func Instalar(dir string, progreso func(bajado, total int64)) error {
 	if !Instalado() {
 		return fmt.Errorf("el instalador terminó pero no está %s; detalle en %s", RutaExe(), logMSI)
 	}
-	// El MSI lo deja corriendo y arrancando con Windows: queda apagado hasta
-	// que lo pidan.
+	return Preparar()
+}
+
+// Preparar deja un RustDesk instalado por el agente como lo necesitamos: con
+// su servicio de Windows (el MSI en silencio NO lo crea), en inicio manual,
+// sin ícono al iniciar sesión y APAGADO hasta que lo pidan.
+func Preparar() error {
+	if err := asegurarServicio(); err != nil {
+		return err
+	}
 	if err := ponerInicioManual(); err != nil {
 		return err
 	}
 	quitarBandejaAlIniciar()
 	return Apagar()
+}
+
+// asegurarServicio crea el servicio de RustDesk si no existe, como hace el
+// script oficial de despliegue (`rustdesk.exe --install-service`).
+func asegurarServicio() error {
+	if servicioExiste() {
+		return nil
+	}
+	ctx, cancelar := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelar()
+	cmd := exec.CommandContext(ctx, RutaExe(), "--install-service")
+	oculto(cmd)
+	_ = cmd.Run() // no informa nada útil: se mira si el servicio apareció
+	for fin := time.Now().Add(60 * time.Second); time.Now().Before(fin); time.Sleep(time.Second) {
+		if servicioExiste() {
+			return nil
+		}
+	}
+	return errors.New("RustDesk no creó su servicio de Windows (--install-service)")
+}
+
+func servicioExiste() bool {
+	m, err := mgr.Connect()
+	if err != nil {
+		return false
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(nombreServicio)
+	if err != nil {
+		return false
+	}
+	s.Close()
+	return true
 }
 
 func descargar(destino string, progreso func(bajado, total int64)) error {

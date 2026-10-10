@@ -27,6 +27,7 @@ type Pedido struct {
 type operaciones interface {
 	Instalado() bool
 	Instalar() error
+	Preparar() error
 	Configurar(Servidor) error
 	Encender() (string, error)
 	LeerID() (string, error)
@@ -285,9 +286,14 @@ func (c *Controlador) encender(serv Servidor, encendido bool) {
 	propio := c.propio
 	c.mu.Unlock()
 	if propio {
-		// Se configura con el servicio apagado (ver Configurar).
+		// Se configura con el servicio apagado (ver Configurar). Preparar crea
+		// el servicio si falta y deja el inicio manual (idempotente).
 		if encendido {
 			_ = c.ops.Apagar()
+		}
+		if err := c.ops.Preparar(); err != nil {
+			falla("no se pudo preparar RustDesk", err)
+			return
 		}
 		if err := c.ops.Configurar(serv); err != nil {
 			falla("no se pudo configurar RustDesk", err)
@@ -322,6 +328,7 @@ type sistema struct{}
 
 func (sistema) Instalado() bool              { return Instalado() }
 func (sistema) Instalar() error              { return Instalar(DirDescargas, nil) }
+func (sistema) Preparar() error              { return Preparar() }
 func (sistema) Configurar(sv Servidor) error { return Configurar(sv) }
 func (sistema) Encender() (string, error)    { return Encender() }
 func (sistema) LeerID() (string, error)      { return LeerID() }

@@ -98,6 +98,12 @@ func CorrerTodos(ctx context.Context, cfg *config.Config, version string, l *log
 
 	// Un solo RustDesk por equipo, para todos los servicios técnicos autorizados.
 	remoto.DirDescargas = config.Dir()
+	if !cfg.RustDeskPropio && remoto.InstaladoPorAgente(config.Dir()) {
+		cfgMu.Lock()
+		cfg.RustDeskPropio = true
+		_ = guardar()
+		cfgMu.Unlock()
+	}
 	ctrl := remoto.Nuevo(cfg.RustDeskPropio, cfg.ConSoporte(), func() {
 		cfgMu.Lock()
 		cfg.RustDeskPropio = true

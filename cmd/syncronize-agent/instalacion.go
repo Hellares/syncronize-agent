@@ -58,8 +58,20 @@ func instalarYArrancar() error {
 		return err
 	}
 	if !strings.EqualFold(filepath.Clean(propio), filepath.Clean(rutaInstalada())) {
-		if err := copiarArchivo(propio, rutaInstalada()); err != nil {
-			return fmt.Errorf("no se pudo copiar el agente a %s: %w", dirInstalacion(), err)
+		// Windows puede tardar un poco en soltar el .exe del servicio detenido.
+		var errCopia error
+		for range 15 {
+			if errCopia = copiarArchivo(propio, rutaInstalada()); errCopia == nil {
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		if errCopia != nil {
+			// Nunca dejar el servicio apagado: arranca con la versión anterior.
+			if instalado {
+				_ = s.Start()
+			}
+			return fmt.Errorf("no se pudo copiar el agente a %s (sigue la versión anterior): %w", dirInstalacion(), errCopia)
 		}
 	}
 	if !instalado {
@@ -73,8 +85,19 @@ func instalarYArrancar() error {
 	return nil
 }
 
+// detenerSiCorre para el servicio (si corre) y dice si lo paró.
+func detenerSiCorre() bool {
+	s := nuevoServicio()
+	if st, err := s.Status(); err != nil || st != service.StatusRunning {
+		return false
+	}
+	_ = s.Stop()
+	esperarDetenido(s)
+	return true
+}
+
 func esperarDetenido(s service.Service) {
-	for i := 0; i < 20; i++ {
+	for range 60 {
 		if st, err := s.Status(); err != nil || st != service.StatusRunning {
 			return
 		}
@@ -274,9 +297,19 @@ func prepararSoporte(cfg *config.Config) {
 		}
 		return
 	}
+	if remoto.InstaladoPorAgente(config.Dir()) {
+		cfg.RustDeskPropio = true
+	}
 	if remoto.Instalado() {
 		if !cfg.RustDeskPropio {
 			fmt.Println("\nEste equipo ya tenía RustDesk: se usará ese, sin cambiar su configuración.")
+			return
+		}
+		// Lo puso el agente: se completa lo que falte (p. ej. el servicio que
+		// v0.6.0 no creaba).
+		if err := remoto.Preparar(); err != nil {
+			fmt.Println("\nNo se pudo preparar el soporte remoto:", err)
+			fmt.Println("Se volverá a intentar cuando el técnico lo pida.")
 		}
 		return
 	}
@@ -287,6 +320,10 @@ func prepararSoporte(cfg *config.Config) {
 		}
 	})
 	fmt.Println()
+	if remoto.Instalado() {
+		// Aunque falle un paso posterior, RustDesk lo puso el agente.
+		cfg.RustDeskPropio = true
+	}
 	if err != nil {
 		fmt.Println("No se pudo instalar ahora:", err)
 		fmt.Println("Se volverá a intentar solo cuando el técnico pida soporte.")

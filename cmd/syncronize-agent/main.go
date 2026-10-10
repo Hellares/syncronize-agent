@@ -153,9 +153,16 @@ func vincular(args []string) error {
 func vincularConCodigo(codigo, url string, lector *bufio.Reader, soporte *bool) error {
 	fmt.Println("Leyendo el equipo...")
 	r := collector.Recolectar(Version)
+	// Volver a vincular con la misma empresa le cambia el token: con el
+	// servicio corriendo, el token viejo recibiría 401 y el servicio se
+	// desvincularía solo. Se para antes y se vuelve a arrancar al final.
+	detenido := detenerSiCorre()
 	fmt.Printf("Vinculando %s (%s %s)...\n", r.Equipo.Hostname, r.Equipo.Fabricante, r.Equipo.Modelo)
 	res, err := client.New(url, Version).Vincular(strings.ToUpper(strings.TrimSpace(codigo)), r)
 	if err != nil {
+		if detenido {
+			_ = nuevoServicio().Start()
+		}
 		return err
 	}
 	cfg, err := config.Cargar()
@@ -270,8 +277,10 @@ func soporte(args []string) error {
 		}
 		// El servicio toma la autorización nueva (y desinstala RustDesk si ya
 		// nadie lo tiene autorizado).
-		if err := service.Control(nuevoServicio(), "restart"); err != nil {
-			return fmt.Errorf("autorización guardada, pero el servicio no se reinició: %w", err)
+		// Restart falla si el servicio estaba detenido: se para (si corre) y se arranca.
+		detenerSiCorre()
+		if err := nuevoServicio().Start(); err != nil {
+			return fmt.Errorf("autorización guardada, pero el servicio no arrancó: %w", err)
 		}
 	}
 	fmt.Println("Soporte remoto:")
@@ -330,7 +339,11 @@ func (p *programa) Start(s service.Service) error {
 			l.Printf("  %s (%s)", v.Nombre(), modo(v))
 		}
 		_ = agent.CorrerTodos(ctx, cfg, Version, l)
-		l.Printf("sin vínculos activos: el agente queda en espera")
+		if ctx.Err() != nil {
+			l.Printf("agente detenido")
+		} else {
+			l.Printf("sin vínculos activos: el agente queda en espera")
+		}
 	}()
 	return nil
 }
