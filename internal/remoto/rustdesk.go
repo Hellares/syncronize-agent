@@ -115,7 +115,25 @@ func Preparar() error {
 		return err
 	}
 	quitarBandejaAlIniciar()
+	ocultarEntradaDuplicada()
 	return Apagar()
+}
+
+// claveDuplicada: --install-service escribe su propia entrada "RustDesk" en
+// Aplicaciones instaladas, además de la del MSI ({GUID}): el cliente veía
+// RustDesk dos veces. Las dos desinstalan lo mismo; queda visible la del MSI.
+const claveDuplicada = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\RustDesk`
+
+func ocultarEntradaDuplicada() {
+	if codigoProductoMSI() == "" {
+		return // sin la entrada del MSI, la de RustDesk es la única: queda visible
+	}
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, claveDuplicada, registry.SET_VALUE)
+	if err != nil {
+		return
+	}
+	defer k.Close()
+	_ = k.SetDWordValue("SystemComponent", 1)
 }
 
 // asegurarServicio crea el servicio de RustDesk si no existe, como hace el
@@ -213,6 +231,10 @@ func Desinstalar() error {
 		cmd := exec.Command("msiexec", "/x", codigo, "/qn", "/norestart")
 		oculto(cmd)
 		if err := cmd.Run(); err == nil || !Instalado() {
+			// La entrada que escribió --install-service no la borra el MSI.
+			if !Instalado() {
+				_ = registry.DeleteKey(registry.LOCAL_MACHINE, claveDuplicada)
+			}
 			return nil
 		}
 	}

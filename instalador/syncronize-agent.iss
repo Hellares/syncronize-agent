@@ -109,9 +109,10 @@ begin
   ListaVinculos := '';
   if not FileExists(ExpandConstant('{commonappdata}\Syncronize\Agent\config.json')) then
     exit;
-  ExtractTemporaryFile('{#Exe}');
+  { Se busca por el nombre con que se instala (DestName), no el de origen. }
+  ExtractTemporaryFile('syncronize-agent.exe');
   archivo := ExpandConstant('{tmp}\vinculos.txt');
-  if not Exec(ExpandConstant('{tmp}\{#Exe}'), 'vinculos --resultado "' + archivo + '"', '',
+  if not Exec(ExpandConstant('{tmp}\syncronize-agent.exe'), 'vinculos --resultado "' + archivo + '"', '',
     SW_HIDE, ewWaitUntilTerminated, rc) then
     exit;
   if not LoadStringsFromFile(archivo, lineas) then
