@@ -7,6 +7,9 @@
 //     un reporte y se lo envía SOLO a esa empresa. La respuesta también trae el
 //     modo (a pedido o continuo).
 //   - reportarPeriodico: SOLO en modo continuo, toma un reporte cada intervalo.
+//   - informarSoporte: si el cliente autorizó el soporte remoto a esa empresa,
+//     le avisa cómo está RustDesk (apagado, encendido con su ID...). El pedido
+//     de encenderlo llega en la misma respuesta de "¿hay pedido?".
 //
 // A pedido (el modo por defecto) el equipo no manda reportes que nadie pidió.
 // Cada reporte se encola en disco (una cola por vínculo) y la cola se vacía
@@ -32,6 +35,7 @@ import (
 	"github.com/Hellares/syncronize-agent/internal/client"
 	"github.com/Hellares/syncronize-agent/internal/collector"
 	"github.com/Hellares/syncronize-agent/internal/config"
+	"github.com/Hellares/syncronize-agent/internal/remoto"
 )
 
 // 50 reportes = ~12 h sin conexión a 15 min. Más viejo que eso no aporta.
@@ -44,6 +48,8 @@ const (
 	// Servidor sin /agentes/pedido: se vuelve a probar cada tanto.
 	reintentoSinPedidos = 10 * time.Minute
 	esperaMaximaError   = 5 * time.Minute
+	// Sin red para avisar el estado del soporte remoto: se reintenta.
+	reintentoSoporte = time.Minute
 )
 
 // Leer el equipo (WMI, impresoras) de a uno: dos empresas pidiendo a la vez
@@ -57,9 +63,11 @@ type pedidos interface {
 
 // Agente atiende UN vínculo (una empresa).
 type Agente struct {
-	v       *config.Vinculo
-	cli     *client.Client
-	ped     pedidos
+	v   *config.Vinculo
+	cli *client.Client
+	ped pedidos
+	// Soporte remoto (uno por equipo, compartido); nil en `send`.
+	ctrl    *remoto.Controlador
 	version string
 	log     *log.Logger
 
@@ -73,10 +81,10 @@ type Agente struct {
 	guardar  func() error
 }
 
-func nuevo(v *config.Vinculo, cfgMu *sync.Mutex, guardar func() error, version string, l *log.Logger) *Agente {
+func nuevo(v *config.Vinculo, cfgMu *sync.Mutex, guardar func() error, ctrl *remoto.Controlador, version string, l *log.Logger) *Agente {
 	cli := client.New(v.Servidor, version)
 	pref := log.New(l.Writer(), l.Prefix()+"["+v.Nombre()+"] ", l.Flags())
-	a := &Agente{v: v, cli: cli, ped: cli, version: version, log: pref, cfgMu: cfgMu, guardar: guardar}
+	a := &Agente{v: v, cli: cli, ped: cli, ctrl: ctrl, version: version, log: pref, cfgMu: cfgMu, guardar: guardar}
 	a.reportar = a.Ciclo
 	return a
 }
@@ -88,12 +96,23 @@ func CorrerTodos(ctx context.Context, cfg *config.Config, version string, l *log
 	guardar := func() error { return config.Guardar(cfg) } // se llama con cfgMu tomado
 	migrarColaVieja(cfg)
 
+	// Un solo RustDesk por equipo, para todos los servicios técnicos autorizados.
+	remoto.DirDescargas = config.Dir()
+	ctrl := remoto.Nuevo(cfg.RustDeskPropio, cfg.ConSoporte(), func() {
+		cfgMu.Lock()
+		cfg.RustDeskPropio = true
+		_ = guardar()
+		cfgMu.Unlock()
+	}, l)
+	go ctrl.Correr(ctx)
+	go quitarSoporteSiNadieLoAutoriza(cfg, cfgMu, guardar, l)
+
 	fin := make(chan *config.Vinculo, len(cfg.Vinculos))
 	cfgMu.Lock()
 	vinculos := append([]*config.Vinculo(nil), cfg.Vinculos...)
 	cfgMu.Unlock()
 	for _, v := range vinculos {
-		a := nuevo(v, cfgMu, guardar, version, l)
+		a := nuevo(v, cfgMu, guardar, ctrl, version, l)
 		go func() {
 			if errors.Is(a.Correr(ctx), client.ErrRevocado) {
 				a.log.Printf("desvinculado desde Syncronize: este servicio técnico deja de recibir datos")
@@ -110,9 +129,36 @@ func CorrerTodos(ctx context.Context, cfg *config.Config, version string, l *log
 			_ = guardar()
 			cfgMu.Unlock()
 			_ = os.RemoveAll(config.DirCola(v.AgenteID))
+			if v.SoporteAutorizado() {
+				ctrl.Olvidar(v.AgenteID)
+				quitarSoporteSiNadieLoAutoriza(cfg, cfgMu, guardar, l)
+			}
 		}
 	}
 	return nil
+}
+
+// quitarSoporteSiNadieLoAutoriza desinstala RustDesk si lo puso el agente y ya
+// ningún servicio técnico tiene autorización (el cliente la retiró, o lo
+// desvincularon).
+func quitarSoporteSiNadieLoAutoriza(cfg *config.Config, cfgMu *sync.Mutex, guardar func() error, l *log.Logger) {
+	cfgMu.Lock()
+	quitar := cfg.RustDeskPropio && cfg.ConSoporte() == 0
+	cfgMu.Unlock()
+	if !quitar {
+		return
+	}
+	if remoto.Instalado() {
+		l.Printf("soporte remoto: nadie lo tiene autorizado, se desinstala RustDesk")
+		if err := remoto.Desinstalar(); err != nil {
+			l.Printf("soporte remoto: no se pudo desinstalar: %v", err)
+			return
+		}
+	}
+	cfgMu.Lock()
+	cfg.RustDeskPropio = false
+	_ = guardar()
+	cfgMu.Unlock()
 }
 
 // EnviarATodos toma un reporte por vínculo y lo envía (comando `send`).
@@ -121,7 +167,7 @@ func EnviarATodos(cfg *config.Config, version string, l *log.Logger) error {
 	guardar := func() error { return config.Guardar(cfg) }
 	var errs []error
 	for _, v := range cfg.Vinculos {
-		if err := nuevo(v, cfgMu, guardar, version, l).Ciclo(); err != nil {
+		if err := nuevo(v, cfgMu, guardar, nil, version, l).Ciclo(); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", v.Nombre(), err))
 		}
 	}
@@ -132,9 +178,10 @@ func EnviarATodos(cfg *config.Config, version string, l *log.Logger) error {
 func (a *Agente) Correr(ctx context.Context) error {
 	ctx, cancelar := context.WithCancel(ctx)
 	defer cancelar()
-	errc := make(chan error, 2)
+	errc := make(chan error, 3)
 	go func() { errc <- a.escucharPedidos(ctx) }()
 	go func() { errc <- a.reportarPeriodico(ctx) }()
+	go func() { errc <- a.informarSoporte(ctx) }()
 	select {
 	case <-ctx.Done():
 		return nil
@@ -208,6 +255,7 @@ func (a *Agente) escucharPedidos(ctx context.Context) error {
 			espera = min(max(2*espera, 15*time.Second), esperaMaximaError)
 			continue
 		}
+		a.pedirSoporte(res.SoporteRemoto)
 		pasoAContinuo := a.aplicarModo(res.Continuo, res.IntervaloSegundos)
 		if !res.Reportar && !pasoAContinuo {
 			continue
@@ -224,6 +272,60 @@ func (a *Agente) escucharPedidos(ctx context.Context) error {
 				return err
 			}
 			a.log.Printf("reporte a pedido: %v", err)
+		}
+	}
+}
+
+// pedirSoporte le pasa al controlador lo que el panel quiere del soporte
+// remoto. Solo cuenta si el cliente autorizó a ESTE servicio técnico.
+func (a *Agente) pedirSoporte(p *client.PedidoSoporte) {
+	if a.ctrl == nil || !a.v.SoporteAutorizado() || p == nil {
+		return
+	}
+	pedido := remoto.Pedido{Servidor: remoto.Servidor{Host: p.Host, Key: p.Key}}
+	if p.RestanteSegundos != nil {
+		hasta := time.Now().Add(time.Duration(*p.RestanteSegundos) * time.Second)
+		pedido.Hasta = &hasta
+	}
+	a.ctrl.Pedir(a.v.AgenteID, pedido)
+}
+
+// informarSoporte le cuenta al backend de esta empresa si el cliente autorizó
+// el soporte remoto y, si sí, cómo está RustDesk cada vez que cambia. Solo
+// vuelve con ctx cancelado o el vínculo revocado.
+func (a *Agente) informarSoporte(ctx context.Context) error {
+	autorizado := a.ctrl != nil && a.v.SoporteAutorizado()
+	var enviado *remoto.Estado
+	for {
+		e, cambio := remoto.Estado{}, (<-chan struct{})(nil)
+		if autorizado {
+			e, cambio = a.ctrl.Estado()
+		}
+		if enviado == nil || *enviado != e {
+			err := a.cli.InformarSoporte(a.v.Token, client.EstadoSoporte{
+				Permitido: autorizado, Estado: e.Estado, ID: e.ID, Detalle: e.Detalle, Version: e.Version,
+			})
+			switch {
+			case errors.Is(err, client.ErrRevocado):
+				return err
+			case errors.Is(err, client.ErrSinPedidos):
+				// Servidor sin soporte remoto: nada que avisar.
+				<-ctx.Done()
+				return nil
+			case err != nil:
+				a.log.Printf("soporte remoto: %v", err)
+				if !dormir(ctx, reintentoSoporte) {
+					return nil
+				}
+				continue
+			}
+			enviado = &e
+		}
+		// Sin autorización, el aviso es uno solo; cambio == nil bloquea.
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-cambio:
 		}
 	}
 }

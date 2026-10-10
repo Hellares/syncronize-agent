@@ -4,7 +4,8 @@
 //
 //	POST {servidor}/agentes/vincular   {codigo, reporte}       → {agenteId, token, intervaloSegundos, empresa}
 //	POST {servidor}/agentes/reporte    Bearer token, Reporte   → {intervaloSegundos?, continuo?}
-//	GET  {servidor}/agentes/pedido     Bearer token            → {reportar, continuo, intervaloSegundos}
+//	GET  {servidor}/agentes/pedido     Bearer token            → {reportar, continuo, intervaloSegundos, soporteRemoto?}
+//	POST {servidor}/agentes/soporte-remoto  Bearer token, {permitido, estado?, id?, detalle?, version?}
 //
 // /pedido es un long-poll: el backend la retiene ~25 s y contesta antes si
 // alguien pide datos desde el panel o cambia el modo.
@@ -71,6 +72,28 @@ type RespuestaPedido struct {
 	Reportar          bool `json:"reportar"`
 	Continuo          bool `json:"continuo"`
 	IntervaloSegundos int  `json:"intervaloSegundos"`
+	// nil = servidor viejo (sin soporte remoto).
+	SoporteRemoto *PedidoSoporte `json:"soporteRemoto"`
+}
+
+// PedidoSoporte: el técnico encendió el soporte remoto desde el panel.
+type PedidoSoporte struct {
+	// Segundos que le quedan al soporte encendido: nil = apagado (no lo
+	// pidieron o lo terminaron); 0 = se venció el plazo. Van segundos y no una
+	// hora porque el reloj del equipo puede estar mal.
+	RestanteSegundos *int `json:"restanteSegundos"`
+	// Servidor de RustDesk; vacío = el público.
+	Host string `json:"host"`
+	Key  string `json:"key"`
+}
+
+// EstadoSoporte es lo que el agente le informa al backend sobre RustDesk.
+type EstadoSoporte struct {
+	Permitido bool   `json:"permitido"`
+	Estado    string `json:"estado,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Detalle   string `json:"detalle,omitempty"`
+	Version   string `json:"version,omitempty"`
 }
 
 // Vincular canjea el código de un solo uso que genera Syncronize por un token.
@@ -112,6 +135,28 @@ func (c *Client) EnviarReporte(token string, reporteJSON []byte) (*RespuestaRepo
 		return nil, fmt.Errorf("el servidor respondió %d", estado)
 	}
 	return &out, nil
+}
+
+// InformarSoporte le dice al backend si el cliente autorizó el soporte remoto
+// y cómo está RustDesk (con el ID para conectarse).
+func (c *Client) InformarSoporte(token string, e EstadoSoporte) error {
+	cuerpo, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	estado, err := c.post("/agentes/soporte-remoto", token, cuerpo, nil)
+	if err != nil {
+		return err
+	}
+	switch {
+	case estado == http.StatusUnauthorized || estado == http.StatusForbidden:
+		return ErrRevocado
+	case estado == http.StatusNotFound:
+		return ErrSinPedidos
+	case estado/100 != 2:
+		return fmt.Errorf("el servidor respondió %d", estado)
+	}
+	return nil
 }
 
 // EsperarPedido pregunta si hay un pedido de datos. Tarda hasta ~25 s si no

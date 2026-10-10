@@ -39,10 +39,16 @@ type Vinculo struct {
 	// true = reporta cada intervalo. false = solo cuando se lo piden desde el
 	// panel. Lo decide el backend (respuesta de /agentes/pedido).
 	Continuo bool `json:"continuo,omitempty"`
+	// El cliente autorizó (true) o no (false) que ESTE servicio técnico le dé
+	// soporte remoto. nil = todavía no se le preguntó (vínculos de v0.5 o antes).
+	SoporteRemoto *bool `json:"soporteRemoto,omitempty"`
 }
 
 type Config struct {
 	Vinculos []*Vinculo `json:"vinculos"`
+	// RustDesk lo instaló el agente (lo configura, lo apaga y lo desinstala).
+	// false con RustDesk en el equipo = es del cliente y no se toca.
+	RustDeskPropio bool `json:"rustdeskPropio,omitempty"`
 }
 
 // formatoViejo: v0.2-v0.4 guardaban UN vínculo en la raíz del archivo.
@@ -144,6 +150,20 @@ func (c *Config) Quitar(v *Vinculo) {
 		}
 	}
 	c.Vinculos = out
+}
+
+// SoporteAutorizado: el cliente dijo que sí a este servicio técnico.
+func (v *Vinculo) SoporteAutorizado() bool { return v.SoporteRemoto != nil && *v.SoporteRemoto }
+
+// ConSoporte cuenta los vínculos con soporte remoto autorizado.
+func (c *Config) ConSoporte() int {
+	n := 0
+	for _, v := range c.Vinculos {
+		if v.SoporteAutorizado() {
+			n++
+		}
+	}
+	return n
 }
 
 // Intervalo devuelve el intervalo de reporte en segundos, con piso de 1 minuto.

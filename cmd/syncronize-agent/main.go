@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,7 @@ import (
 	"github.com/Hellares/syncronize-agent/internal/client"
 	"github.com/Hellares/syncronize-agent/internal/collector"
 	"github.com/Hellares/syncronize-agent/internal/config"
+	"github.com/Hellares/syncronize-agent/internal/remoto"
 )
 
 // Version la pisa el build: -ldflags "-X main.Version=x.y.z".
@@ -35,9 +37,13 @@ var Version = "0.1.0-dev"
 const ayuda = `Uso: syncronize-agent <comando>
 
   (doble clic)  pide permisos de administrador y el código, y vincula
-  enroll --codigo XXXX [--beta | --servidor URL]
+  enroll --codigo XXXX [--beta | --servidor URL] [--soporte-remoto]
             vincula el equipo, se instala en Program Files y arranca el servicio
+            (--soporte-remoto: el cliente autorizó el soporte remoto)
   status    muestra la vinculación, el servicio y los reportes en cola
+  soporte [permitir | quitar]
+            estado del soporte remoto (RustDesk); permitir/quitar cambia la
+            autorización de TODOS los servicios técnicos
   collect   imprime el reporte del equipo en JSON (no envía nada)
   send      toma un reporte y lo envía ahora (prueba de conexión)
   start | stop | restart
@@ -96,6 +102,8 @@ func ejecutar(cmd string, args []string) error {
 		return service.Control(nuevoServicio(), cmd)
 	case "uninstall":
 		return desinstalar()
+	case "soporte":
+		return soporte(args)
 	case "run":
 		return correrEnPrimerPlano()
 	case "help", "-h", "--help":
@@ -112,6 +120,7 @@ func vincular(args []string) error {
 	codigo := fs.String("codigo", "", "código de vinculación generado en Syncronize")
 	beta := fs.Bool("beta", false, "usar el servidor de pruebas")
 	servidor := fs.String("servidor", "", "URL del API (por defecto, producción)")
+	conSoporte := fs.Bool("soporte-remoto", false, "el cliente autorizó el soporte remoto")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -128,13 +137,20 @@ func vincular(args []string) error {
 	if *servidor != "" {
 		url = *servidor
 	}
-	return vincularConCodigo(*codigo, url)
+	// Sin --soporte-remoto queda sin preguntar: el asistente lo pregunta después.
+	var soporte *bool
+	if *conSoporte {
+		soporte = conSoporte
+	}
+	return vincularConCodigo(*codigo, url, nil, soporte)
 }
 
 // vincularConCodigo canjea el código y AGREGA el vínculo (los que ya había,
-// con otros servicios técnicos, siguen). Instala el agente en Program Files y
-// (re)arranca el servicio para que tome el vínculo nuevo. Pide admin.
-func vincularConCodigo(codigo, url string) error {
+// con otros servicios técnicos, siguen). Pregunta por el soporte remoto (con
+// lector, en el asistente) o usa lo que diga soporte (en `enroll`). Instala
+// el agente en Program Files y (re)arranca el servicio para que tome el
+// vínculo nuevo. Pide admin.
+func vincularConCodigo(codigo, url string, lector *bufio.Reader, soporte *bool) error {
 	fmt.Println("Leyendo el equipo...")
 	r := collector.Recolectar(Version)
 	fmt.Printf("Vinculando %s (%s %s)...\n", r.Equipo.Hostname, r.Equipo.Fabricante, r.Equipo.Modelo)
@@ -146,10 +162,16 @@ func vincularConCodigo(codigo, url string) error {
 	if err != nil && !errors.Is(err, config.ErrSinVincular) {
 		return err
 	}
-	cfg.Agregar(&config.Vinculo{
+	v := &config.Vinculo{
 		Servidor: url, AgenteID: res.AgenteID, Token: res.Token, Empresa: res.Empresa,
 		VinculadoEn: time.Now().UTC(), IntervaloSegundos: res.IntervaloSegundos,
-	})
+		SoporteRemoto: soporte,
+	}
+	cfg.Agregar(v)
+	if lector != nil {
+		preguntarSoporte(lector, v)
+	}
+	prepararSoporte(cfg)
 	if err := config.Guardar(cfg); err != nil {
 		return err
 	}
@@ -211,11 +233,76 @@ func desinstalar() error {
 		return err
 	}
 	esperarDetenido(s)
+	if cfg, err := config.Cargar(); err == nil && cfg.RustDeskPropio && remoto.Instalado() {
+		fmt.Println("Quitando el soporte remoto (RustDesk)...")
+		if err := remoto.Desinstalar(); err != nil {
+			fmt.Println("No se pudo quitar RustDesk:", err)
+		}
+	}
 	if err := config.Borrar(); err != nil {
 		return err
 	}
 	borrarInstalacion()
 	fmt.Println("Servicio quitado, vínculos borrados y agente desinstalado.")
+	return nil
+}
+
+// soporte muestra el estado del soporte remoto o cambia la autorización.
+func soporte(args []string) error {
+	cfg, err := config.Cargar()
+	if err != nil {
+		return err
+	}
+	if len(args) > 0 {
+		if args[0] != "permitir" && args[0] != "quitar" {
+			return fmt.Errorf("uso: soporte [permitir | quitar]")
+		}
+		if err := exigirAdmin(); err != nil {
+			return err
+		}
+		si := args[0] == "permitir"
+		for _, v := range cfg.Vinculos {
+			v.SoporteRemoto = &si
+		}
+		prepararSoporte(cfg)
+		if err := config.Guardar(cfg); err != nil {
+			return err
+		}
+		// El servicio toma la autorización nueva (y desinstala RustDesk si ya
+		// nadie lo tiene autorizado).
+		if err := service.Control(nuevoServicio(), "restart"); err != nil {
+			return fmt.Errorf("autorización guardada, pero el servicio no se reinició: %w", err)
+		}
+	}
+	fmt.Println("Soporte remoto:")
+	for _, v := range cfg.Vinculos {
+		autorizado := map[bool]string{true: "autorizado", false: "no autorizado"}[v.SoporteAutorizado()]
+		if v.SoporteRemoto == nil {
+			autorizado = "sin preguntar"
+		}
+		fmt.Printf("  - %s: %s\n", v.Nombre(), autorizado)
+	}
+	if !remoto.Instalado() {
+		fmt.Println("RustDesk:   no instalado")
+		return nil
+	}
+	de := "lo instaló el agente"
+	if !cfg.RustDeskPropio {
+		de = "ya estaba en el equipo (no se toca)"
+	}
+	fmt.Printf("RustDesk:   instalado (%s)\n", de)
+	if !remoto.Encendido() {
+		fmt.Println("Estado:     apagado (nadie se puede conectar)")
+		return nil
+	}
+	id, err := remoto.LeerID()
+	if err != nil {
+		id = err.Error()
+	}
+	fmt.Println("Estado:     ENCENDIDO, ID", id)
+	if remoto.SesionActiva() {
+		fmt.Println("            hay un técnico conectado")
+	}
 	return nil
 }
 

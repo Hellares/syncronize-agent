@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/Hellares/syncronize-agent/internal/config"
+	"github.com/Hellares/syncronize-agent/internal/remoto"
 )
 
 // ServidorPorDefecto lo fija el build (`build.ps1 -Beta` apunta a beta).
@@ -143,6 +144,7 @@ func asistente() {
 	fmt.Println("Reporta a tu servicio técnico el estado del equipo:")
 	fmt.Println("discos, batería, memoria, espacio, antivirus e impresoras.")
 	fmt.Println("NO lee archivos, fotos, contraseñas ni historial.")
+	fmt.Println("El soporte remoto es aparte: se pregunta y es opcional.")
 	fmt.Println()
 	if servidorPorDefecto() != config.ServidorProd {
 		fmt.Println("(servidor de PRUEBAS: " + servidorPorDefecto() + ")")
@@ -171,9 +173,22 @@ func asistente() {
 		fmt.Println()
 		fmt.Printf("  1) Actualizar el agente a la versión %s\n", Version)
 		fmt.Println("  2) Agregar OTRO servicio técnico (necesita su código)")
-		fmt.Print("\nElige 1 o 2 [1]: ")
+		fmt.Println("  3) Soporte remoto: autorizar o quitar")
+		fmt.Print("\nElige 1, 2 o 3 [1]: ")
 		resp, _ := lector.ReadString('\n')
 		if r := strings.TrimSpace(resp); r != "2" {
+			// Los vínculos de antes del soporte remoto: se les pregunta una vez.
+			for _, v := range cfg.Vinculos {
+				if r == "3" || v.SoporteRemoto == nil {
+					preguntarSoporte(lector, v)
+				}
+			}
+			prepararSoporte(cfg)
+			if err := config.Guardar(cfg); err != nil {
+				fmt.Println("\nNo se pudo guardar:", err)
+				pausa()
+				return
+			}
 			if err := instalarYArrancar(); err != nil {
 				fmt.Println("\nNo se pudo actualizar:", err)
 			} else {
@@ -193,7 +208,7 @@ func asistente() {
 			continue
 		}
 		fmt.Println()
-		if err := vincularConCodigo(codigo, servidorPorDefecto()); err != nil {
+		if err := vincularConCodigo(codigo, servidorPorDefecto(), lector, nil); err != nil {
 			fmt.Println()
 			fmt.Println("No se pudo vincular:", err)
 			fmt.Println()
@@ -216,6 +231,69 @@ func nombreServidor(url string) string {
 		return "BETA (pruebas)"
 	}
 	return url
+}
+
+// preguntarSoporte pide al cliente (no al técnico) que decida si ese servicio
+// técnico le puede dar soporte remoto. Por defecto, no.
+func preguntarSoporte(lector *bufio.Reader, v *config.Vinculo) {
+	fmt.Println()
+	fmt.Println("----------------------------------------------")
+	fmt.Printf("SOPORTE REMOTO con %s\n", v.Nombre())
+	fmt.Println("----------------------------------------------")
+	fmt.Println("Permite que el técnico vea y use esta pantalla para ayudarte.")
+	fmt.Println("  - Cada vez que quiera conectarse aparece una ventana y TÚ")
+	fmt.Println("    decides si aceptas. Sin tu clic no puede entrar.")
+	fmt.Println("  - Solo se enciende cuando el técnico lo pide y se apaga al terminar.")
+	fmt.Println("  - Usa RustDesk (programa de código abierto), que se instala aparte.")
+	actual := "n"
+	if v.SoporteAutorizado() {
+		actual = "s"
+	}
+	fmt.Printf("\n¿Lo autorizas? Escribe s (sí) o n (no) [%s]: ", actual)
+	resp, _ := lector.ReadString('\n')
+	r := strings.ToLower(strings.TrimSpace(resp))
+	if r == "" {
+		r = actual
+	}
+	si := r == "s" || r == "si" || r == "sí"
+	v.SoporteRemoto = &si
+	if si {
+		fmt.Println("Autorizado.")
+	} else {
+		fmt.Println("No autorizado: solo monitoreo.")
+	}
+}
+
+// prepararSoporte instala RustDesk ya (con el cliente mirando) si alguien lo
+// autorizó. Si falla, el servicio lo vuelve a intentar cuando el técnico lo pida.
+// Si ya nadie lo autoriza, el servicio lo desinstala al arrancar.
+func prepararSoporte(cfg *config.Config) {
+	if cfg.ConSoporte() == 0 {
+		if cfg.RustDeskPropio && remoto.Instalado() {
+			fmt.Println("\nSe quitará el soporte remoto (RustDesk) de este equipo.")
+		}
+		return
+	}
+	if remoto.Instalado() {
+		if !cfg.RustDeskPropio {
+			fmt.Println("\nEste equipo ya tenía RustDesk: se usará ese, sin cambiar su configuración.")
+		}
+		return
+	}
+	fmt.Printf("\nInstalando el soporte remoto (RustDesk %s, ~26 MB)...\n", remoto.Version)
+	err := remoto.Instalar(config.Dir(), func(bajado, total int64) {
+		if total > 0 {
+			fmt.Printf("\r  descargando: %3d %%", bajado*100/total)
+		}
+	})
+	fmt.Println()
+	if err != nil {
+		fmt.Println("No se pudo instalar ahora:", err)
+		fmt.Println("Se volverá a intentar solo cuando el técnico pida soporte.")
+		return
+	}
+	cfg.RustDeskPropio = true
+	fmt.Println("Soporte remoto instalado. Queda APAGADO hasta que el técnico lo pida.")
 }
 
 func pausa() {

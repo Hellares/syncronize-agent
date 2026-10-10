@@ -17,7 +17,7 @@ Agente de monitoreo para **Windows** que reporta el estado técnico del equipo a
 | Impresoras de red: tinta/tóner, contador de páginas, serie, firmware (IPP y SNMP) | |
 | Antivirus: activo, tiempo real, antigüedad de firmas | |
 
-El agente **no ejecuta nada** que le mande el servidor. Para ver exactamente qué envía, corre `syncronize-agent collect`.
+El agente **no ejecuta nada** que le mande el servidor. La única excepción es el [soporte remoto](#soporte-remoto-opcional), que es opcional y el cliente lo autoriza aparte: el servidor solo puede pedir **encender o apagar RustDesk**. Para ver exactamente qué envía, corre `syncronize-agent collect`.
 
 ## Instalación en el equipo del cliente
 
@@ -30,12 +30,15 @@ El agente **no ejecuta nada** que le mande el servidor. Para ver exactamente qu�
    - se copia a `C:\Program Files\Syncronize\Agent\` (el .exe original ya se puede borrar);
    - instala el servicio `SyncronizeAgent` (inicio automático retrasado, se reinicia si falla) y lo arranca.
 
-Sin doble clic, en una consola de administrador: `syncronize-agent.exe enroll --codigo ABC123` (`--beta` para el servidor de pruebas).
+Después de vincular, el instalador le pregunta **al cliente** si autoriza el [soporte remoto](#soporte-remoto-opcional) para ese servicio técnico. Por defecto, no.
+
+Sin doble clic, en una consola de administrador: `syncronize-agent.exe enroll --codigo ABC123` (`--beta` para el servidor de pruebas; `--soporte-remoto` si el cliente lo autorizó).
 
 Volver a correrlo en un equipo ya instalado muestra con quién está vinculado y ofrece dos opciones:
 
 1. **Actualizar**: detiene el servicio, reemplaza el .exe de Program Files y lo vuelve a arrancar. No pide código.
 2. **Agregar otro servicio técnico**: pide el código de esa empresa.
+3. **Soporte remoto: autorizar o quitar**, para cada servicio técnico.
 
 ### Varios servicios técnicos
 
@@ -47,7 +50,21 @@ Un mismo equipo puede estar vinculado con **varios servicios técnicos a la vez*
 
 Cada técnico ve **solo lo suyo**: no recibe los datos de los otros ni sabe que existen. Los reportes se envían por separado a cada empresa que los pide. Si una empresa desvincula el equipo, el agente quita **solo ese vínculo** y los demás siguen. Volver a vincular con la misma empresa reemplaza su vínculo, no lo duplica. `status` lista todos los vínculos.
 
-Para desinstalar: `"C:\Program Files\Syncronize\Agent\syncronize-agent.exe" uninstall` como administrador. Quita el servicio, la vinculación y la carpeta. Si el cliente retira su autorización, se desvincula desde Syncronize y el agente deja de reportar solo.
+Para desinstalar: `"C:\Program Files\Syncronize\Agent\syncronize-agent.exe" uninstall` como administrador. Quita el servicio, la vinculación y la carpeta, y también RustDesk si lo instaló el agente. Si el cliente retira su autorización, se desvincula desde Syncronize y el agente deja de reportar solo.
+
+## Soporte remoto (opcional)
+
+Si el cliente lo autoriza, el técnico puede ver y usar la pantalla del equipo para ayudarlo, con [RustDesk](https://github.com/rustdesk/rustdesk) (código abierto, AGPL-3.0).
+
+- **Autorización aparte, por servicio técnico**. La da el cliente en el instalador, no el técnico. Con varios servicios técnicos, cada uno tiene la suya.
+- **El cliente acepta CADA conexión** con un clic, en una ventana de RustDesk (`approve-mode = click`). No hay contraseña que permita entrar sin que lo vea.
+- **Apagado por defecto**. El servicio de RustDesk queda en inicio manual y no escucha conexiones. Se enciende solo cuando el técnico toca "Iniciar soporte remoto" en el panel (le llega al agente por la misma pregunta "¿hay pedido?"). Se apaga cuando el técnico lo termina, o a las 2 horas. Si en ese momento hay una sesión abierta, espera a que termine.
+- **Instalador oficial sin modificar**. El agente descarga el MSI oficial de una versión fija desde los releases de RustDesk en GitHub y verifica su SHA-256 antes de instalarlo (sin accesos directos ni impresora virtual). La versión y el hash están en `internal/remoto/rustdesk.go`.
+- **RustDesk del cliente**. Si el equipo ya tenía RustDesk, el agente lo usa tal cual: no cambia su configuración, no lo apaga si ya estaba encendido y no lo desinstala.
+- **Servidor**. Por defecto, el servidor público de RustDesk. El backend puede indicar otro (host y clave) sin reinstalar nada.
+- **Quitarlo**. `syncronize-agent soporte quitar` (como administrador), u opción 3 del instalador. Si ningún servicio técnico queda autorizado, o se desinstala el agente, se desinstala RustDesk si lo puso el agente.
+
+Cada vez que un técnico enciende el soporte remoto queda registrado en Syncronize quién lo encendió y cuándo.
 
 ## Comandos
 
@@ -58,7 +75,9 @@ Para desinstalar: `"C:\Program Files\Syncronize\Agent\syncronize-agent.exe" unin
 | `send` | Toma un reporte y lo envía ya (prueba de conexión). |
 | `start` / `stop` / `restart` | Controlan el servicio. |
 | `run` | Corre en primer plano, para diagnóstico. |
-| `uninstall` | Quita el servicio y borra la vinculación. |
+| `uninstall` | Quita el servicio y borra la vinculación (y RustDesk si lo instaló el agente). |
+| `soporte` | Muestra la autorización del soporte remoto por servicio técnico y el estado de RustDesk (encendido, ID, sesión abierta). |
+| `soporte permitir` / `soporte quitar` | Autoriza o quita el soporte remoto para todos los servicios técnicos. |
 
 ## Cómo funciona
 
@@ -80,8 +99,12 @@ Para desinstalar: `"C:\Program Files\Syncronize\Agent\syncronize-agent.exe" unin
 ```
 POST {servidor}/agentes/vincular   {codigo, reporte}            → {agenteId, token, intervaloSegundos}
 POST {servidor}/agentes/reporte    Authorization: Bearer token  → {intervaloSegundos?, continuo?}
-GET  {servidor}/agentes/pedido     Authorization: Bearer token  → {reportar, continuo, intervaloSegundos}
+GET  {servidor}/agentes/pedido     Authorization: Bearer token  → {reportar, continuo, intervaloSegundos, soporteRemoto?}
+POST {servidor}/agentes/soporte-remoto  Authorization: Bearer token, {permitido, estado?, id?, detalle?, version?}
 ```
+
+- `soporteRemoto` en `/pedido`: `{restanteSegundos, host, key}`. `restanteSegundos` es `null` si está apagado y `0` si se venció el plazo. Van segundos y no una hora porque el reloj del equipo puede estar mal. `host`/`key` vacíos = servidor público de RustDesk. Solo cuenta si el cliente autorizó a esa empresa.
+- `/soporte-remoto`: el agente lo manda al arrancar y cada vez que cambia el estado (`INACTIVO`, `INSTALANDO`, `ACTIVO` con el `id` de RustDesk, `ERROR` con `detalle`). Con `permitido: false`, el backend apaga y olvida el ID.
 
 - Los cuerpos van en JSON comprimido con gzip (`Content-Encoding: gzip`).
 - La forma del reporte está en `internal/collector/types.go`. `version` sube solo si cambia la forma, no por campos opcionales nuevos.
@@ -113,6 +136,7 @@ El agente envía datos **solo al servidor de Syncronize** (`saas.syncronize.net.
 
 - **Qué envía**: únicamente el estado técnico listado en [Qué lee y qué no](#qué-lee-y-qué-no) (equipo, Windows, CPU, memoria, discos, batería, red, impresoras, antivirus). Nunca archivos, documentos, fotos, contraseñas, historial ni capturas de pantalla.
 - **Cuándo**: a pedido, cuando el técnico toca "Actualizar datos". Solo si el técnico activa el monitoreo continuo, también cada 15 minutos.
+- **Soporte remoto**: solo con una autorización aparte del cliente, y el cliente acepta cada conexión en su pantalla. El agente informa únicamente si RustDesk está encendido y su ID. Ver [Soporte remoto](#soporte-remoto-opcional).
 - **Aviso al instalar**: el instalador explica qué lee y pide el código que el técnico genera tras registrar la autorización del cliente.
 - **Cómo desactivarlo**: el técnico lo desvincula desde Syncronize, o se desinstala en el equipo con `"C:\Program Files\Syncronize\Agent\syncronize-agent.exe" uninstall`. Esto quita el servicio, los vínculos y la carpeta del programa.
 - Política de privacidad de Syncronize: https://syncronize.net.pe/privacidad
@@ -131,3 +155,5 @@ Every signed binary is built by GitHub Actions from the source code in this repo
 ## Licencia
 
 [MIT](LICENSE) © 2026 Syncronize SAC. El agente es libre y gratuito; el servicio de Syncronize (panel y servidor) es un producto aparte.
+
+RustDesk no forma parte de este repositorio ni de sus binarios: el agente descarga e instala el instalador oficial, sin modificar, que se distribuye con su propia licencia ([AGPL-3.0](https://github.com/rustdesk/rustdesk/blob/master/LICENCE)).
